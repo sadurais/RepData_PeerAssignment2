@@ -1,0 +1,370 @@
+---
+title: Analysis of damage caused by Storm events on US Population and Property for years 1950-2011
+author: "Sathish Duraisamy"
+date: "January 22, 2015"
+output: html_document
+---
+
+# Introduction
+Storms and other severe weather events can cause both public health and economic problems for communities and municipalities. Many severe events can result in fatalities, injuries, and property damage, and preventing such outcomes to the extent possible is a key concern. This report involves exploring the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database. This database tracks characteristics of major storms and weather events in the United States, including when and where they occur, as well as estimates of any fatalities, injuries, and property damage.
+
+# Synopsis
+The objective of this report is to collect the data, preprocess (clean up) 
+it and explore the Storm events in US over the period of 1950 to 2011, and
+thereby to identify the most severe events that cause the most damage to
+humans and property. We retrieve the data for this task from the 
+National Weather Service Storm Data Documentation. We then look for 
+inconsistent and erraneous data, typical of historically maintained data
+sources, and transform the dataset into a tidy one. From this and with
+the associated documentation on the data fields, we plot some exploratory
+plots/charts to visualy grasp the impact of these storm events on humans
+and property. Every step is documented along the way in a reproducible
+manner.
+    
+# Data Retrieval and Processing
+Historical storm data has been maintained by
+U.S. National Oceanic and Atmospheric Administration [NOAA][1]
+There is also some documentation of the database available. Here you will 
+find how some of the variables are constructed/defined [DFN][2]
+
+[1]: http://www.noaa.gov/    "NOAA"
+[2]: http://www.ncdc.noaa.gov/stormevents/  "DFN"
+    
+The data for this assignment come in the form of a comma-separated-value 
+file compressed via the bzip2 algorithm to reduce its size. 
+we download the raw bzip file first, record the data downloaded, 
+uncompress it to get the CSV file inside. We then read the CSV file 
+into a data.frame of R language and display the number of rows and columns.
+    
+    
+```{r echo=TRUE, eval=TRUE, results='hide'}
+library(ggplot2)
+library(dplyr)
+library(R.utils)
+library(scales)
+library(stringr)
+library(reshape2)
+library(data.table)
+```
+
+```{r echo=TRUE, eval=TRUE, cache=TRUE}
+
+fetch_datafiles_if_not_already <- function() {
+    require(R.utils)
+
+    # Lets download the zipFile and extract our inputFile off of it
+    inputFile <- "repdata-data-StormData.csv"
+    if (!file.exists(inputFile)) {
+        bzipFile <- "repdata-data-StormData.csv.bz2"
+        if (!file.exists(bzipFile)) {
+            bzipUrl <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+            tryCatch({
+                message("Downloading a huge bzip file. Please wait....")
+                download.file(bzipUrl, destfile=bzipFile,
+                              method="curl", quiet=TRUE)
+
+                # Display the downloaded data
+                download_date <- Sys.Date()
+                download_date
+            }, error = function(cond) {
+                stop(paste("Error dowloading bzipFile: ", bzipFile,
+                           ". Reason: ", cond))
+            })
+        }
+
+        tryCatch({
+            bunzip2(bzipFile)  # Unzip to current working dir
+        }, error = function(cond) {
+            stop(paste("Error extracting bzipFile: ", bzipFile,
+                       ". Reason: ", cond))
+        })
+    }
+}
+
+
+read_storm_data_efficient <- function() {
+    require(data.table)
+
+    fetch_datafiles_if_not_already()
+
+    # dfSD must be defined in the caller's scope for efficiency
+    if (is.null(SD)) {
+        inputFile <- "repdata-data-StormData.csv"
+        message("Loading huge data file 'StormData'. Please be patient!")
+        SD <<- read.csv("repdata-data-StormData.csv", header=TRUE,
+                       nrow=1240000, sep=",", comment.char="",
+                       stringsAsFactors=FALSE)
+
+        # Show the number of rows and columns of our data
+        # just after datafile is read
+        dim(SD)
+
+        preprocess_data()
+    }
+}
+```
+
+## Data Pre-Processing / Cleanup
+The events in the database start in the year 1950 and end in November 2011. In the earlier years of the database there are generally fewer events recorded, most likely due to a lack of good records. More recent years should be considered more complete. We see that the EVTYPE column helps us differentiate various events but this is a free form text field probably human input that has various sorts of data integrity issues ranging from spelling mistakes to empty values to nonsensical values such as LIGHTNING vs LIGHNTING to 'APACHE TERRITORY' to " " (empty strings).
+This results in too many classifications (~840) whereas the associated documentation suggestes only around ~50 classifications. We perform a sequence of the cleaning operations to consolidate(reduce) this variable from ~840 values to ~45 values.
+
+```{r echo=TRUE, eval=TRUE, cache=TRUE}
+# Crop damage and Property Damage columns have another column associated
+# them that give the exponent (10 to the power) for the value
+# We need to combine those pairs of columsn
+exponent_code_to_value <- function(e) {
+    ifelse(e=='H', 100,
+               ifelse(e=='T' | e == 'K', 1000, 
+                      ifelse(e=='M', 10^6, 
+                             ifelse(e=='B', 10^9, 1))))
+}
+
+
+preprocess_data <- function() {
+    # Take only these columns and throw away the rest
+    # BGN_DATE, STATE, EVTYPE, FATALITIES, INJURIES,
+    # PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP
+    requiredCols <- c(2, 7, 8, 23:28)
+    SD <<- SD[,requiredCols]
+
+    # Consistent lower-case variable(column) names
+    names(SD) <<- tolower(names(SD))
+
+    # The EVTYPE variable has many human error characteristics
+    # typical of free form text input. Lets apply a series of
+    # transformations to that column
+    SD$evtype.orig <<- SD$evtype
+
+    SD$evtype <<- sanitize_event_type(SD$evtype)
+
+    # Crop damage and Property Damage columns have another column associated
+    # them that give the exponent (10 to the power) for the value
+    # We need to combine those pairs of columsn
+    ok <- complete.cases(SD$cropdmg, SD$cropdmgexp)
+    SD$cropdmg[ok] <<- SD$cropdmg[ok] * exponent_code_to_value(toupper(SD$cropdmgexp[ok]))
+    ok <- complete.cases(SD$propdmg, SD$propdmgexp)
+    SD$propdmg[ok] <<- SD$propdmg[ok] * exponent_code_to_value(toupper(SD$propdmgexp[ok]))
+    
+    #Just after preprocessing, display the number of rows & cols, col-names
+    dim(SD)
+    names(SD)
+}
+```
+
+The pre-processing step involves reducing the multiple storm type string values 
+into few manageable and consistent values.
+
+ *   First we convert the evtype values to a consistent uppercase and trim the leading and trailing spaced. So a value " Heavy Wind / High Surf   " becomes "HEAVY WIND / HIGH SURF"
+ 
+ *   Then we replace each non-word character (that is not an alphabet or digit or underscore) with a single space and a sequence of spaces with a single space as well.. "HEAVY WIND /  HIGH SURF" becomes "HEAVY WIND HIGH SURF"
+ 
+ *   Remove observations with human data entry errors. We can't classify them anyway. 
+ 
+ *   Then apply a series of regular expression match and replacements to reduce the ~840 possibilities into ~40 possibilities.
+
+```{r echo=TRUE, eval=TRUE, cache=TRUE}
+sanitize_event_type <- function(evtype) {
+    # First, upper-case, trim leading and training whitespace
+    evtype <- str_trim(toupper(evtype))
+
+    # Replace non-word chars with a single space. Multiple spaces into one space
+    evtype <- gsub("\\W+", " ", evtype)
+    evtype <- gsub("\\s+", " ", evtype)
+
+    # Human errors; can't classify them
+    evtype <- gsub("^(SUMMARY|MONTHLY|NO |NONE|SEI|APACHE|SOUTH|\\s+).*",
+                   NA, evtype) 
+
+    # Apply these pattern replacements to reduce the ~900 unique possibilities
+    # into a manageable ~40 possible classifications.
+    pat <- c(
+        #----------------------------
+        #"pattern","replacement"
+        #----------------------------
+        "^RECORD\\s*HIGH", "HIGH",
+        "^RECORD\\s*LOW", "LOW",
+        "^(RECORD|EXCESSIVE)", "HIGH",
+        "^AVALAN.*", "Avalanche",
+        "^BEACH ERO.*", "Beach Erosion",
+        ".*BLIZZAR.*", "Blizzard",
+        "^BLOWING SNOW.*", "Blowing Snow",
+        "^COASTAL.*FLO.*", "Coastal Flood",
+        "^COASTAL.*STO.*", "Coastal Storm",
+        ".*(COLD|ICE|ICY|WET|WINT|FREEZ|CHILL|COOL).*", "Cold",
+        ".*(THUNDER.*ST|TSTM).*", "Thunderstorm",
+        "^DUST.*(DEV|STO).*", "Dust Storm",
+        "^EXTRE.*COLD.*", "Extream Cold",
+        ".*(FLASH.*FLOO|URB.*STR).*", "Flash Flood",
+        ".*(FLOOD|SMALL\\s*STR).*", "Flood",
+        "^URBAN.*FLOOD.*", "Flood",
+        "^FREEZ.*RAIN.*", "Freezing Rain",
+        "^HAIL.*", "Hail Storm",
+        "^HEAVY.*(RAIN|SHOWER).*", "Heavy Rain",
+        "^HEAVY.*SNOW.*", "Heavy Snow",
+        "^HIGH.*WIND.*", "High Wind",
+        "^HIGH.*SURF.*", "High Surf",
+        "^HURRICANE.*", "Hurrycane",
+        "^HYP(O|ER)TH.*", "Hypothermia",
+        "^(ICE|ICY).*STOR.*", "Icy Storm",
+        "^LIGHTNING.*", "Lightning",
+        "^LIGHT.*SNOW.*", "Light Snow",
+        ".*(LAND|MUD).*(SLIDE|SLUMP).*", "Land Slide",
+        "^RAIN.*", "Rain",
+        "^SNOW.*", "Snow",
+        "^TIDAL.*FLOO.*", "Tidal Flood",
+        ".*(FLOOD|FLD).*", "Flood",
+        "^TORN(ADO|DAO).*", "Tornado",
+        "^TROPICAL.*STORM.*", "Tropical Storm",
+        "^VOLCAN.*ERUP.*", "Volcanic Eruption",
+        "^VOLCAN.*ASH.*", "Volcanic Ash",
+        "^WATER.*SPOU.*", "Water Spout",
+        ".*WIND CHILL.*", "Wind Chill",
+        "^WIND.*", "Wind",
+        "^WINTER.*STOR.*", "Winter Storm",
+        ".*UNSEASON.*", "Unseasonable Weather",
+        ".*(SWELL|WAVE|WATER|SURF|COASTAL|TIDE|SEA|MARINE).*", "Heavy Tide",
+        ".*(WIND|WND|GUST|DUST).*", "Wind",
+        ".*SNOW.*", "Heavy Snow",
+        ".*(FIRE|SMOKE).*", "Fire",
+        ".*(DRY|WARM|HEAT|HOT|DRIEST|DROUGHT).*", "Heat",
+        ".*FOG.*", "Fog",
+        ".*(FUNNEL|CLOUD).*", "Cloud",
+        ".*(RAIN|PRECIP).*", "Heavy Rain",
+        ".*HAIL.*", "Hail",
+        ".*LIG.*ING.*", "Lightning",
+        ".*HIGH.*TEMP.*", "Heat",
+        ".*(FROST|LOW.*TEMP).*", "Cold",
+        ".*SLIDE.*", "Landslide",
+        ".*TSUNA.*", "Tsunami",
+        ".*TYPHOO.*", "Typhoon",
+        ".*SPOUT.*", "Water Spout",
+        ".*DROWN.*", "Drowning",
+        ".*URBAN.*SMALL.*", "Flash Flood",
+        ".*DAM\\s+.*", "Dam Failure",
+        "^[A-Z][A-Z]+.*", "Other"  # Put evertying else in 'Other' bucket
+    )
+    for (r in seq(1, length(pat), 2)) {
+        pattern <- pat[r]; replacement <- pat[r+1];
+        evtype <- gsub(pattern, replacement, x=evtype)
+    }
+    evtype
+}
+
+```
+
+
+Now, we read the data and make the first level of counts per each event type
+total fatalities, total injuries, total property damages and total
+crop damages.
+
+```{r echo=TRUE, eval=TRUE, cache=TRUE}
+SD <- NULL
+read_storm_data_efficient()
+
+# Get totals of fatality, injury, cropdmg, propdmg, per each unique event
+df <- SD %>%
+        group_by(evtype) %>%
+        summarise(tot_fatal = sum(fatalities), 
+                  tot_injur = sum(injuries),
+                  tot_propdmg = sum(propdmg),
+                  tot_cropdmg = sum(cropdmg))
+
+```
+
+
+# Question #1: Which events are the most harmful to Public Health/Life ?
+
+* let us group by the evevnt-type now and calculate the total events per event-type,
+total fatality count, total injury count, mean fatality count, mean injury count.
+We also calculate the overall_rank that is made of Total Fataliies, Total Injuries, 
+Mean Fatalities, Mean Injuries and the Frequency of the event itself. We will use
+this overall_rank to figure out the most severe (lets say, an event results in 
+human fatality as well as injuries and as well as occurs very frequently, then it
+will get the highest rank as per this formula)
+
+* We then remove those event-types with no fatalities or injuries.
+
+* We create the 5 quantile groups (0%, 25%, 50%, 75%, 100%) for the 4 values so
+that we can pick the most severe (the 5th group) of the values.
+
+* We then rescale the range of overall_rank values between 1 and 10 so that it
+can be nicely plotted on axis. As the rank values are too far apart (for example,
+tornado is an outlier, with most severe impact), we use the log scale to plot.
+
+
+```{r echo=TRUE, eval=TRUE, cache=TRUE}
+    dfh <- df %>%
+            filter(tot_fatal > 0 | tot_injur > 0) %>%
+            arrange(tot_fatal)
+    y_scale <- seq_along(1:NROW(dfh))
+    dfh <- dfh %>% mutate(evtype_f = factor(y_scale, levels=y_scale, labels=evtype))
+
+    dfh # This is the final contents of our Tidy data, just before plotting
+
+    # Melt a 3 column dataset into a 2 column dataset for easy 
+    # two series-of-points plotting in the same plot
+    df2 <- melt(dfh[,c("evtype_f", "tot_fatal", "tot_injur")], id="evtype_f")
+    df2$variable <- gsub("tot_fatal", "Fatalities", df2$variable)
+    df2$variable <- gsub("tot_injur", "Injuries", df2$variable)
+
+    ggplot(df2, aes(y=evtype_f, x=log(value), colour=variable, size=value)) + 
+      geom_point(shape=20) + 
+      scale_size_continuous(range = c(4,15)) +
+      ylab("Event Type") +
+      xlab("Health Impact (Fatalities/Injuries) in log scale") +
+      ggtitle("Storm Events impact on US Population Health for 1950-2011")
+      
+```
+
+# Result #1
+      The plot shows that
+      over the course of years 1950 to 2011, Tornados, Thunderstorms, Heat,
+      Hail Storms appear to be causing most Human fatalities/injuries for
+      the years 1950-2011". Tornado is the most damaging event with ~5600 
+      deaths and ~91400 injuries.
+```{r echo=TRUE, eval=TRUE}
+  # Top most 5 severe events 
+  head(arrange(dfh, -tot_fatal)[,c(1,2,3)], 5)
+```      
+      
+
+-----------------------------------------------------------------------------
+      
+# Question #2: Which events cause the most damage to US Properties/Agriculture ?
+
+```{r echo=TRUE, eval=TRUE}
+    dfp <- df %>%
+            filter(complete.cases(evtype, tot_propdmg, tot_cropdmg) & 
+                       tot_propdmg > 0 | tot_cropdmg > 0) %>%
+            arrange(tot_propdmg)
+    y_scale <- seq_along(1:NROW(dfp))
+    dfp <- dfp %>% mutate(evtype_f = factor(y_scale, levels=y_scale, labels=evtype))
+
+    dfp # This is the final contents of our Tidy data, just before plotting
+
+    # Melt a 3 column dataset into a 2 column dataset for easy 
+    # two series-of-points plotting in the same plot
+    df2 <- melt(dfp[,c("evtype_f", "tot_cropdmg", "tot_propdmg")], id="evtype_f")
+    df2$variable <- gsub("tot_cropdmg", "Crops", df2$variable)
+    df2$variable <- gsub("tot_propdmg", "Properties", df2$variable)
+
+    ggplot(df2, aes(y=evtype_f, x=log(value), colour=variable, size=value)) + 
+      geom_point(shape=20) + 
+      scale_size_continuous(range = c(4,15)) +
+      ylab("Event Type") +
+      xlab("Financial Impact (Crops/Property damages) in log scale") +
+      ggtitle("Storm events impact on US Properties/Crops for 1950-2011")
+```
+
+# Results #2
+      The plot shows that
+      over the course of years 1950 to 2011, Flood, Hurricane, Tornados
+      and Floods are severe events that have caused the most damage to the 
+      Crops and Properties in United States. Tornado is the most damaging event with ~5600 
+      deaths and ~91400 injuries.
+```{r echo=TRUE, eval=TRUE}
+  # Top most 5 severe events 
+  head(arrange(dfp, -tot_propdmg)[,c(1,4,5)], 5)
+```      
+      
+
